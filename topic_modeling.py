@@ -36,6 +36,7 @@ from sklearn.feature_extraction.text import CountVectorizer
 import os
 import torch
 import argparse
+import numpy as np # Required for np.mean, np.std, np.abs
 
 # --- Function Definitions ---
 
@@ -65,9 +66,9 @@ def load_data(db_file: str, min_wc: int) -> pd.DataFrame:
 
     print(f"Connecting to {db_file} and loading messages with at least {min_wc} words...")
     with sqlite3.connect(db_file) as conn:
-        query = f"SELECT text_content, create_time FROM messages WHERE text_content IS NOT NULL AND word_count >= {min_wc}"
+        query = "SELECT text_content, create_time FROM messages WHERE text_content IS NOT NULL AND CAST(word_count AS INTEGER) >= ?"
         try:
-            df = pd.read_sql_query(query, conn)
+            df = pd.read_sql_query(query, conn, params=(min_wc,))
         except sqlite3.OperationalError as e:
             print(f"SQL Error: {e}. Ensure 'messages' table has 'text_content', 'create_time', and 'word_count' columns.")
             raise
@@ -200,6 +201,74 @@ def visualize_and_save(topic_model: BERTopic, df: pd.DataFrame, topics: list[int
     fig.write_html(output_html_file)
     print(f"\n✅ Success! Interactive visualization saved to '{output_html_file}'")
     print("You can now open this HTML file in your web browser to explore the topics.")
+
+def detect_topic_anomalies(df_topics: pd.DataFrame, topic_id: int, z_thresh: float = 3.0) -> dict:
+    """
+    Detects anomalies (sudden spikes) in the frequency of a specific topic over time.
+
+    Args:
+        df_topics (pd.DataFrame): DataFrame containing 'timestamp' (datetime),
+                                  'topic' (int), and 'text_content' (str) columns.
+                                  'timestamp' should be the creation time of messages.
+                                  'topic' is the topic ID assigned to each message.
+        topic_id (int): The specific topic ID to analyze for anomalies.
+        z_thresh (float): The Z-score threshold to identify a spike. Spikes are
+                          days where the topic count's Z-score exceeds this value.
+
+    Returns:
+        dict: A dictionary containing anomaly information. For 'sudden_spikes',
+              it includes a list of dates and corresponding counts for those spikes.
+              Example: {'sudden_spikes': {'dates': ['2023-01-15', ...], 'counts': [50, ...]}}
+              Returns empty lists if no spikes are detected or if the topic has no data.
+    """
+    print(f"\nDetecting anomalies for topic ID: {topic_id} with Z-score threshold: {z_thresh}")
+
+    # Filter for the specific topic
+    topic_data = df_topics[df_topics['topic'] == topic_id].copy()
+
+    if topic_data.empty:
+        print(f"No data found for topic ID: {topic_id}. Cannot detect anomalies.")
+        return {'sudden_spikes': {'dates': [], 'counts': []}}
+
+    # Ensure 'timestamp' is datetime
+    topic_data['timestamp'] = pd.to_datetime(topic_data['timestamp'])
+
+    # Group by date and count occurrences
+    # The result of groupby().size() is a Series. reset_index(name='count') converts it to DataFrame.
+    topic_daily_counts = topic_data.groupby(topic_data['timestamp'].dt.date)['text_content'].count().reset_index(name='count')
+
+    # Rename the aggregated date column to 'date'
+    topic_daily_counts = topic_daily_counts.rename(columns={'timestamp': 'date'})
+
+    if topic_daily_counts.empty or len(topic_daily_counts) < 2: # Need at least 2 data points for std dev
+        print(f"Not enough daily data points for topic ID: {topic_id} to calculate Z-scores reliably.")
+        return {'sudden_spikes': {'dates': [], 'counts': []}}
+
+    # Calculate Z-scores for the daily counts
+    counts_array = topic_daily_counts['count'].values
+    mean_count = np.mean(counts_array)
+    std_count = np.std(counts_array)
+
+    if std_count == 0: # Avoid division by zero if all counts are the same
+        print(f"Standard deviation of counts is zero for topic ID: {topic_id}. Cannot calculate Z-scores.")
+        return {'sudden_spikes': {'dates': [], 'counts': []}}
+
+    topic_daily_counts['z_score'] = (topic_daily_counts['count'] - mean_count) / std_count
+
+    # Identify spike dates using .iloc for robust selection
+    spike_indices = np.where(np.abs(topic_daily_counts['z_score']) > z_thresh)[0]
+
+    if len(spike_indices) == 0:
+        print(f"No sudden spikes detected for topic ID: {topic_id}.")
+        spike_dates = []
+        spike_counts = []
+    else:
+        # Use .iloc for robust index-based selection
+        spike_dates = topic_daily_counts.iloc[spike_indices]['date'].astype(str).tolist()
+        spike_counts = topic_daily_counts.iloc[spike_indices]['count'].tolist()
+        print(f"Detected {len(spike_dates)} spike(s) for topic ID: {topic_id} on dates: {spike_dates} with counts: {spike_counts}")
+
+    return {'sudden_spikes': {'dates': spike_dates, 'counts': spike_counts}}
 
 # --- Main Execution ---
 def run_topic_modeling(db_file_path: str, model_path_str: str, output_html_path: str,
