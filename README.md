@@ -57,3 +57,20 @@ I welcome contributions to improve ChatHistoryToProject. If you have ideas, enco
 
 Happy Chatting with Projects! 🚀
 
+
+---
+
+## 📚 Export to ShareGPT JSONL
+
+If you want to turn your exported chats into ShareGPT-style training data, use the `sharegpt_converter.py` helper.
+
+1. Place `sharegpt_converter.py` alongside your exported `2023-*.json` files (or adjust the glob to match your filenames).
+2. Run the converter:
+
+   ```bash
+   python sharegpt_converter.py --input-pattern "2023-*.json" --output-file training_data_sharegpt.jsonl
+   ```
+
+   Use `--verbose` for extra logging or `--min-turns` to require more user/assistant turns before a conversation is emitted.
+
+The script writes one ShareGPT-formatted conversation per line to the specified JSONL file.
